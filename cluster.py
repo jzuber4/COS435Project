@@ -1,9 +1,10 @@
+# Some sources referenced for the creation of this script:
 # http://scikit-learn.org/stable/auto_examples/text/document_clustering.html#example-text-document-clustering-py
 # http://brandonrose.org/clustering
 #
+# cluster.py
 # Author: Jimmy Zuber
-# This script gathers information about the movies
-# based on some criteria.
+# This script clusters movies based on information from the IMDb database (stored in data/)
 #
 from __future__ import print_function
 from collections import OrderedDict
@@ -17,7 +18,7 @@ from unidecode import unidecode
 import argparse
 import math
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
 import random
 import re
 import sys
@@ -78,6 +79,8 @@ def parse_movie_line(line):
 
     return Movie(title, movie_type, year, year_end)
 
+# read in a file containing people (actors, editors, etc.) and return
+# a dictionary mapping movie names to a list of those people
 def read_people(people, filename, movies):
     # regex to find end of movie title
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
@@ -132,6 +135,8 @@ def get_match_sets():
         ["Jack Reacher (2012)", "Mission: Impossible (1996)", "Minority Report (2002)"], # Tom Cruise Action Movies
     ]
 
+# read in a file containing information of the genres of a movie
+# and return a dictionary mapping movie names to a list of its genres
 def read_genres(filename, movies):
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
     genres = {}
@@ -147,7 +152,8 @@ def read_genres(filename, movies):
             genres[movie].append(genre)
     return genres
 
-
+# read in a file containing information on the plot summaries of a movie
+# and return a dictionary mapping movie names to (concatenated) plot summaries
 def read_plots(filename, movies):
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
     plots = {}
@@ -195,6 +201,7 @@ def read_plots(filename, movies):
     return plots
 
 def main():
+    # IMDb database text file encoding
     encoding = 'latin1'
 
     # takes a list of actions as command line arguments
@@ -212,6 +219,7 @@ def main():
                         raise argparse.ArgumentError(self, message)
                 setattr(namespace, self.dest, values)
 
+    # parse command line with some options, very useful for testing
     parser = argparse.ArgumentParser()
     parser.add_argument('actions', nargs='*', action=DefaultListAction,
                     default = ['plot'],
@@ -331,9 +339,13 @@ def main():
         q_print('Reading data from disk...')
         data = joblib.load('movie_data.pkl')
 
+    # construct the matrix describing the data
+    # choose which features to add as well as their weights
     if 'all' in args.actions or 'features' in args.actions:
+        # optionally, limit the number of movies clustered
         if args.limit < 1.0:
             # exempt certain movies from removal
+            # these are the hand picked groups
             exempted_movies = set()
             for movie_list in get_match_sets():
                 for m in movie_list:
@@ -350,11 +362,15 @@ def main():
         joblib.dump(data, 'movie_data_in_use.pkl')
 
         q_print("Computing tf-idf matrix...")
-        # do tf-idf vectorization of actors and keywords
+        # do tf-idf vectorization of each feature
         keywords_vectorizer = TfidfVectorizer(analyzer=lambda d: d["keywords"], encoding=encoding)
+        # don't use idf, major genres still carry information, prolific actors/directors have a lot of information
         people_vectorizer = TfidfVectorizer(analyzer=lambda d: d["people"], encoding=encoding, use_idf= False)
         genres_vectorizer = TfidfVectorizer(analyzer=lambda d: d["genres"], encoding=encoding, use_idf= False)
+        # remove common english words from plot summaries
         plots_vectorizer = TfidfVectorizer(preprocessor=lambda d: d["plots"], encoding=encoding, stop_words='english')
+
+        # combine all features
         union = FeatureUnion(
             [
                 ('genres',    genres_vectorizer),
@@ -362,6 +378,7 @@ def main():
                 ('people',    people_vectorizer),
                 ('plots',     plots_vectorizer),
             ],
+            # relative weights of each feature
             transformer_weights = {
                 'genres':    2,
                 'keywords':  4,
@@ -370,6 +387,7 @@ def main():
             }
         )
 
+        # get the matrix on which clustering will be performed
         X = union.fit_transform(data.values())
 
         terms = union.get_feature_names()
@@ -385,6 +403,7 @@ def main():
         terms = joblib.load('movie_terms.pkl')
         X = joblib.load('movie_X.pkl')
 
+    # perform the clustering
     if 'all' in args.actions or 'cluster' in args.actions:
         q_print("Clustering Data...")
         km = KMeans(n_clusters = n_clusters)
@@ -400,9 +419,11 @@ def main():
         q_print('Reading clusters from disk...')
         km = joblib.load('movie_cluster.pkl')
 
+    # compute a lower dimensional representation
+    # using Singular Value Decomposition
     if 'all' in args.actions or 'svd' in args.actions:
         q_print("Computing Lower Dimension Representation...")
-        svd = TruncatedSVD(n_components=3).fit_transform(X)
+        svd = TruncatedSVD(n_components=2).fit_transform(X)
         q_print('Writing svd to disk...')
         joblib.dump(svd, 'movie_svd.pkl')
 
@@ -415,35 +436,41 @@ def main():
         svd = joblib.load('movie_svd.pkl')
 
 
+    # compute information on the clusters (and print it)
+    # plot 2d representation
     if 'all' in args.actions or 'plot' in args.actions:
         n_clusters = len(km.cluster_centers_)
         N = len(km.labels_)
 
-        xs, ys, zs = svd[:, 0], svd[:, 1], svd[:, 2]
+        xs, ys = svd[:, 0], svd[:, 1]
         clusters = [[] for _ in range(n_clusters)]
         for i in range(N):
-            clusters[km.labels_[i]].append((xs[i], ys[i], zs[i]))
+            clusters[km.labels_[i]].append((xs[i], ys[i]))
 
+        q_print("Mean cluster size: {}".format(np.mean([len(c) for c in clusters])))
+        q_print("Standard deviation of cluster size: {}".format(np.std([len(c) for c in clusters])))
         q_print("Top terms per cluster:")
         order_centroids = km.cluster_centers_.argsort()[:, ::-1]
         for i in range(n_clusters):
             q_print("Cluster {} ({} movies):".format(i, len(clusters[i])), end='')
             q_print(" ".join(terms[t] for t in order_centroids[i, :10]))
 
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
+        fig, ax = plt.subplots(figsize=(17, 9))
 
         r = lambda: random.randint(0, 252)
         cluster_color = ['#%02X%02X%02X' % (r(),r(),r()) for _ in range(n_clusters)]
 
         ax.margins(0.05)
         for i, c in enumerate(clusters):
-            xs, ys, zs = zip(*c)
-            ax.scatter(xs, ys, zs, marker='o', color = cluster_color[i])
+            xs, ys = zip(*c)
+            ax.scatter(xs, ys, marker='o', color = cluster_color[i])
+            ax.set_aspect('auto')
 
         plt.show()
 
 
+    # test the clustering against certain groups - hand picked and generated from information
+    # on links of movies
     if 'all' in args.actions or 'test' in args.actions:
         q_print("Reading in data that was used for computation")
         data = joblib.load('movie_data_in_use.pkl')
