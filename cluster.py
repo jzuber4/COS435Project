@@ -78,10 +78,9 @@ def parse_movie_line(line):
 
     return Movie(title, movie_type, year, year_end)
 
-def read_people(filename, movies):
+def read_people(people, filename, movies):
     # regex to find end of movie title
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
-    people = {}
     with open(filename) as f:
         last_person = None
         for l in f:
@@ -112,13 +111,15 @@ def read_people(filename, movies):
                 raise ValueError("A movie was listed without an actor.")
             if not name in people:
                 people[name] = []
-            people[name].append(last_person)
+            # only add new names
+            if not last_person in people[name]:
+                people[name].append(last_person)
 
     return people
 
 def read_plots(filename, movies):
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
-    plots = {}
+    plots = OrderedDict()
     last_movie = None
     plot = ""
 
@@ -163,13 +164,12 @@ def read_plots(filename, movies):
     return plots
 
 def main():
-    n_clusters = 20
     encoding = 'latin1'
 
     # takes a list of actions as command line arguments
     # source: http://stackoverflow.com/a/8527629
     class DefaultListAction(argparse.Action):
-        CHOICES=['all', 'preprocess', 'features', 'cluster', 'svd', 'plot']
+        CHOICES=['all', 'preprocess', 'features', 'cluster', 'svd', 'plot', 'test']
         def __call__(self, parser, namespace, values, option_string=None):
             if values:
                 for value in values:
@@ -184,17 +184,32 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('actions', nargs='*', action=DefaultListAction,
                     default = ['plot'],
-                    metavar='ACTION')
+                    metavar='ACTION',
+                    help='Optionally, actions from the list: {}.'.format(DefaultListAction.CHOICES))
+    parser.add_argument('-q', '--quiet', action='store_true', help='disable printing of progress')
+    parser.add_argument('-l', '--limit', type=float, help='fraction of movies to consider', default = 1.0)
+    parser.add_argument('-c', '--clusters', type=int, help='number of clusters', default = 20)
     args = parser.parse_args()
+    if not 0 < args.limit  <= 1.0:
+        parser.print_help()
+        return
+
+    n_clusters = args.clusters
+
+    # make printing function that prints if not args.quiet
+    def optional_print(if_print):
+        def inner(*args, **kwargs):
+            if if_print:
+                print(*args, **kwargs)
+        return inner
+    q_print = optional_print(not args.quiet)
 
     if 'all' in args.actions or 'preprocess' in args.actions:
         # regex to find end of movie title
         regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
-        # indices for movies and keywords
-        movie_indices = {}
         movies = set()
 
-        print("Reading movies...")
+        q_print("Reading movies...")
         with open("data/movies.list") as f:
             for line in f:
                 movie = parse_movie_line(line)
@@ -203,31 +218,41 @@ def main():
                     continue
                 # movies of incorrect type
                 if movie.movie_type != MovieType.theater:
-                    print("Only considering regular movies.")
+                    q_print("Only considering regular movies.")
                     continue
                 movies.add(movie.name)
-                # set index of movie
-                if not movie.name in movie_indices:
-                    movie_indices[movie.name] = len(movie_indices)
 
-        print('Reading plots...')
+        q_print('Reading plots...')
         plots = read_plots('data/plot.list', movies)
 
-        print('Reading actors...')
-        actors = read_people("data/actors.list", movies)
+        q_print('Removing accents, lowercasing words in plots...')
+        for name, plot in plots.items():
+            plots[name] = unidecode(unicode(plot, encoding)).lower()
 
-        print('Reading directors...')
-        directors = read_people('data/directors.list', movies)
+        q_print('Reading people: ', end='')
+        sys.stdout.flush()
 
-        print('Reading producers...')
-        producers = read_people('data/producers.list', movies)
+        q_print('actors... ', end='')
+        sys.stdout.flush()
+        people = read_people(OrderedDict(), "data/actors.list", movies)
 
-        print('Reading writers...')
-        writers = read_people('data/writers.list', movies)
+        q_print('editors... ', end='')
+        sys.stdout.flush()
+        people = read_people(people, "data/editors.list", movies)
 
-        print("Reading keywords...")
-        keywords = {}
-        keyword_counts = {}
+        q_print('directors... ', end='')
+        sys.stdout.flush()
+        people = read_people(people, 'data/directors.list', movies)
+
+        q_print('producers... ', end='')
+        sys.stdout.flush()
+        people = read_people(people, 'data/producers.list', movies)
+
+        q_print('writers... ')
+        people = read_people(people, 'data/writers.list', movies)
+
+        q_print("Reading keywords...")
+        keywords = OrderedDict()
         with open("data/keywords.list") as f:
             for line in f:
                 index = regex.search(line).end()
@@ -239,55 +264,28 @@ def main():
                 keyword = line.split()[-1]
 
                 # add keyword to movie
-                if not keyword in keyword_counts:
-                    keyword_counts[keyword] = 0
                 if not name in keywords:
                     keywords[name] = []
-                keyword_counts[keyword] += 1
                 keywords[name].append(keyword)
 
-        print("Finding most frequent keywords...")
-        most_frequent = [keyword for (keyword, _) in sorted(keyword_counts.items(), key=lambda (k, v): v, reverse=True)]
-
-        n_removed = 25
-        min_keywords = 5
-        min_actors = 3
-        print("""Eliminating {} most frequent keywords, removing movies with < {} keywords,
-< {} actors, no directors, no producers, or no writers...""".format(n_removed, min_keywords, min_actors))
-        print(most_frequent[:n_removed])
+        bad_substrings = ['title', 'novel', 'book', 'play', 'film', 'relationship']
+        q_print("Eliminating keywords with substrings in {}".format(bad_substrings))
         for name, v in keywords.items():
-            v = [k for k in v if not k in most_frequent[:n_removed]]
-            test = name in actors and name in directors and name in producers
-            test = test and name in writers and name in plots
-            if not test or len(v) < min_keywords or len(actors[name]) < min_actors:
-                movies.remove(name)
-                del(keywords[name])
-                if name in actors:
-                    del(actors[name])
-                if name in directors:
-                    del(directors[name])
-                if name in producers:
-                    del(producers[name])
-                if name in writers:
-                    del(writers[name])
-                if name in plots:
-                    del(plots[name])
+            keywords[name] = [keyword for keyword in v if not any(s in keyword for s in bad_substrings)]
 
-        print("Combining data sources...")
-        data = {}
+        q_print("Combining data sources, only including movies with people, plots and keywords...")
+        data = OrderedDict()
         for name in movies:
-            data[name] = {
-                'keywords': keywords[name],
-                'actors': actors[name],
-                'directors': directors[name],
-                'producers': producers[name],
-                'writers': writers[name],
-                'plots': plots[name],
-            }
+            if name in people and name in plots and name in keywords:
+                data[name] = {
+                    'people':    people[name],
+                    'keywords':  keywords[name],
+                    'plots':     plots[name],
+                }
 
-        print("{} movies in dataset.".format(len(movies)))
+        q_print("{} movies in dataset.".format(len(data)))
 
-        print('Writing data to disk...')
+        q_print('Writing data to disk...')
         joblib.dump(data, 'movie_data.pkl')
 
         if 'preprocess' in args.actions:
@@ -295,43 +293,43 @@ def main():
             if len(args.actions) == 0:
                 return
     else:
-        print('Reading data from disk...')
+        q_print('Reading data from disk...')
         data = joblib.load('movie_data.pkl')
 
     if 'all' in args.actions or 'features' in args.actions:
-        print("Computing tf-idf matrix...")
+        if args.limit < 1.0:
+            q_print("Restricting dataset to ~{}% of original".format(100 * args.limit))
+            for name in data.keys():
+                if random.random() > args.limit:
+                    del(data[name])
+
+            q_print("{} movies in dataset.".format(len(data)))
+
+        q_print('Writing the data that will be used')
+        joblib.dump(data, 'movie_data_in_use.pkl')
+
+        q_print("Computing tf-idf matrix...")
         # do tf-idf vectorization of actors and keywords
-        actors_vectorizer    = TfidfVectorizer(analyzer=lambda d: d["actors"],    encoding=encoding, use_idf=False)
-        directors_vectorizer = TfidfVectorizer(analyzer=lambda d: d["directors"], encoding=encoding, use_idf=False)
-        keywords_vectorizer  = TfidfVectorizer(analyzer=lambda d: d["keywords"],  encoding=encoding)
-        producers_vectorizer = TfidfVectorizer(analyzer=lambda d: d["producers"], encoding=encoding, use_idf=False)
-        writers_vectorizer   = TfidfVectorizer(analyzer=lambda d: d["writers"],   encoding=encoding, use_idf=False)
-        def plot_preprocessor(data):
-            return unidecode(unicode(data['plots'], encoding)).lower()
-        plots_vectorizer     = TfidfVectorizer(preprocessor=plot_preprocessor, encoding=encoding)
+        keywords_vectorizer = TfidfVectorizer(analyzer=lambda d: d["keywords"], encoding=encoding)
+        people_vectorizer = TfidfVectorizer(analyzer=lambda d: d["people"], encoding=encoding, use_idf= False)
+        plots_vectorizer = TfidfVectorizer(preprocessor=lambda d: d["plots"], encoding=encoding, stop_words='english')
         union = FeatureUnion(
             [
-                ('actors',    actors_vectorizer),
-                ('directors', directors_vectorizer),
                 ('keywords',  keywords_vectorizer),
+                ('people',    people_vectorizer),
                 ('plots',     plots_vectorizer),
-                ('producers', producers_vectorizer),
-                ('writers',   writers_vectorizer),
             ],
             transformer_weights = {
-                'actors':    1,
-                'directors': 1,
-                'keywords':  2,
-                'plots':     2,
-                'producers': 1,
-                'writers':   1,
+                'keywords':  0.6,
+                'people':    0.2,
+                'plots':     0.2,
             }
         )
 
         X = union.fit_transform(data.values())
 
         terms = union.get_feature_names()
-        print('Writing terms and transformed data to disk...')
+        q_print('Writing terms and transformed data to disk...')
         joblib.dump(terms, 'movie_terms.pkl')
         joblib.dump(X, 'movie_X.pkl')
         if 'features' in args.actions:
@@ -339,15 +337,15 @@ def main():
             if len(args.actions) == 0:
                 return
     else:
-        print('Reading terms and transformed data from disk...')
+        q_print('Reading terms and transformed data from disk...')
         terms = joblib.load('movie_terms.pkl')
         X = joblib.load('movie_X.pkl')
 
     if 'all' in args.actions or 'cluster' in args.actions:
-        print("Clustering Data...")
+        q_print("Clustering Data...")
         km = KMeans(n_clusters = n_clusters)
         km.fit(X)
-        print('Writing clusters to disk...')
+        q_print('Writing clusters to disk...')
         joblib.dump(km, 'movie_cluster.pkl')
 
         if 'cluster' in args.actions:
@@ -355,13 +353,13 @@ def main():
             if len(args.actions) == 0:
                 return
     else:
-        print('Reading clusters from disk...')
+        q_print('Reading clusters from disk...')
         km = joblib.load('movie_cluster.pkl')
 
     if 'all' in args.actions or 'svd' in args.actions:
-        print("Computing Lower Dimension Representation...")
+        q_print("Computing Lower Dimension Representation...")
         svd = TruncatedSVD(n_components=3).fit_transform(X)
-        print('Writing svd to disk...')
+        q_print('Writing svd to disk...')
         joblib.dump(svd, 'movie_svd.pkl')
 
         if 'svd' in args.actions:
@@ -369,7 +367,7 @@ def main():
             if len(args.actions) == 0:
                 return
     else:
-        print('Reading svd from disk...')
+        q_print('Reading svd from disk...')
         svd = joblib.load('movie_svd.pkl')
 
 
@@ -382,16 +380,16 @@ def main():
         for i in range(N):
             clusters[km.labels_[i]].append((xs[i], ys[i], zs[i]))
 
-        print("Top terms per cluster:")
+        q_print("Top terms per cluster:")
         order_centroids = km.cluster_centers_.argsort()[:, ::-1]
         for i in range(n_clusters):
-            print("Cluster {} ({} movies):".format(i, len(clusters[i])), end='')
-            print(" ".join(terms[t] for t in order_centroids[i, :10]))
+            q_print("Cluster {} ({} movies):".format(i, len(clusters[i])), end='')
+            q_print(" ".join(terms[t] for t in order_centroids[i, :10]))
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
 
-        r = lambda: random.randint(0, 250)
+        r = lambda: random.randint(0, 252)
         cluster_color = ['#%02X%02X%02X' % (r(),r(),r()) for _ in range(n_clusters)]
 
         ax.margins(0.05)
@@ -400,5 +398,51 @@ def main():
             ax.scatter(xs, ys, zs, marker='o', color = cluster_color[i])
 
         plt.show()
+
+
+    if 'all' in args.actions or 'test' in args.actions:
+        q_print("Reading in data that was used for computation")
+        data = joblib.load('movie_data_in_use.pkl')
+
+        q_print("Reading in movie links")
+        seen = set()
+        groups = []
+        with open("data/movie-links.list") as f:
+            group = []
+            regex_begin = re.compile('\((follows |followed by |version of )')
+            regex_end = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
+            for l in f:
+                if len(l.strip()) == 0:
+                    if len(group) != 0:
+                        groups.append(group)
+                        group = []
+                    continue
+
+                l = l.strip()
+
+                if l.startswith(" "):
+                    l = l[regex_begin.search(l).end():]
+
+                movie = l[:regex_end.search(l).end()]
+                if not movie in seen and movie in data:
+                    seen.add(movie)
+                    group.append(movie)
+
+
+        indices = {}
+        for i, name in enumerate(data.keys()):
+            indices[name] = i
+
+        q_print("Comparing movie links to clusters.")
+        count = 0
+        for group in groups:
+            first_index = km.labels_[indices[group[0]]]
+            print(len(group))
+            if all(km.labels_[indices[movie]] == first for movie in group[1:]):
+                count += 1
+        print(sum(len(group) for group in groups) / float(len(groups)))
+        q_print("{} out of {} movie links are contained by clusters.".format(count, len(groups)))
+
+
 
 main()
