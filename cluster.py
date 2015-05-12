@@ -117,9 +117,40 @@ def read_people(people, filename, movies):
 
     return people
 
+# prepicked sets of movies that should be clustered together
+def get_match_sets():
+    return [
+        ["Spider-Man (2002)", "X-Men (2000)", "X-Men Origins: Wolverine (2009)"], # early superhero films
+        ["The Lion King (1994)", "Toy Story (1995)", "Monsters, Inc. (2001)"], # 3d animated disney / pixar
+        ["City Lights (1931)", "The Gold Rush (1925)", "Modern Times (1936)"], # Chaplin
+        ["Saw (2004)", "The Ring (2002)", "Paranormal Activity (2007)"], # horror movies
+        ["The Notebook (2004)", "Dear John (2010/I)", "A Walk to Remember (2002)"], # romantic dramas
+        ["The Terminator (1984)", "Aliens (1986)", "Predator (1987)"], # 80s sci fi
+        ["Zoolander (2001)", "Blades of Glory (2007)", "Tropic Thunder (2008)"], # comedy
+        ["Notting Hill (1999)", "Love Actually (2003)", "Music and Lyrics (2007)"], # romantic comedies
+        ["Moonrise Kingdom (2012)", "The Darjeeling Limited (2007)", "Rushmore (1998)"], # Wes Anderson
+        ["Jack Reacher (2012)", "Mission: Impossible (1996)", "Minority Report (2002)"], # Tom Cruise Action Movies
+    ]
+
+def read_genres(filename, movies):
+    regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
+    genres = {}
+    with open(filename) as f:
+        for l in f:
+            l = l.strip()
+            genre = l.split('\t')[-1]
+            movie = l[:regex.search(l).end()]
+            if not movie in movies:
+                continue
+            if not movie in genres:
+                genres[movie] = []
+            genres[movie].append(genre)
+    return genres
+
+
 def read_plots(filename, movies):
     regex = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
-    plots = OrderedDict()
+    plots = {}
     last_movie = None
     plot = ""
 
@@ -222,6 +253,9 @@ def main():
                     continue
                 movies.add(movie.name)
 
+        q_print('Reading genres...')
+        genres = read_genres('data/genres.list', movies)
+
         q_print('Reading plots...')
         plots = read_plots('data/plot.list', movies)
 
@@ -234,7 +268,7 @@ def main():
 
         q_print('actors... ', end='')
         sys.stdout.flush()
-        people = read_people(OrderedDict(), "data/actors.list", movies)
+        people = read_people({}, "data/actors.list", movies)
 
         q_print('editors... ', end='')
         sys.stdout.flush()
@@ -252,7 +286,7 @@ def main():
         people = read_people(people, 'data/writers.list', movies)
 
         q_print("Reading keywords...")
-        keywords = OrderedDict()
+        keywords = {}
         with open("data/keywords.list") as f:
             for line in f:
                 index = regex.search(line).end()
@@ -273,13 +307,14 @@ def main():
         for name, v in keywords.items():
             keywords[name] = [keyword for keyword in v if not any(s in keyword for s in bad_substrings)]
 
-        q_print("Combining data sources, only including movies with people, plots and keywords...")
+        q_print("Combining data sources, only including movies with people, plots, genres and keywords...")
         data = OrderedDict()
         for name in movies:
-            if name in people and name in plots and name in keywords:
+            if name in people and name in plots and name in keywords and name in genres:
                 data[name] = {
-                    'people':    people[name],
+                    'genres':    genres[name],
                     'keywords':  keywords[name],
+                    'people':    people[name],
                     'plots':     plots[name],
                 }
 
@@ -298,9 +333,15 @@ def main():
 
     if 'all' in args.actions or 'features' in args.actions:
         if args.limit < 1.0:
+            # exempt certain movies from removal
+            exempted_movies = set()
+            for movie_list in get_match_sets():
+                for m in movie_list:
+                    exempted_movies.add(m)
+
             q_print("Restricting dataset to ~{}% of original".format(100 * args.limit))
             for name in data.keys():
-                if random.random() > args.limit:
+                if random.random() > args.limit and not name in exempted_movies:
                     del(data[name])
 
             q_print("{} movies in dataset.".format(len(data)))
@@ -312,17 +353,20 @@ def main():
         # do tf-idf vectorization of actors and keywords
         keywords_vectorizer = TfidfVectorizer(analyzer=lambda d: d["keywords"], encoding=encoding)
         people_vectorizer = TfidfVectorizer(analyzer=lambda d: d["people"], encoding=encoding, use_idf= False)
+        genres_vectorizer = TfidfVectorizer(analyzer=lambda d: d["genres"], encoding=encoding, use_idf= False)
         plots_vectorizer = TfidfVectorizer(preprocessor=lambda d: d["plots"], encoding=encoding, stop_words='english')
         union = FeatureUnion(
             [
+                ('genres',    genres_vectorizer),
                 ('keywords',  keywords_vectorizer),
                 ('people',    people_vectorizer),
                 ('plots',     plots_vectorizer),
             ],
             transformer_weights = {
-                'keywords':  0.6,
-                'people':    0.2,
-                'plots':     0.2,
+                'genres':    2,
+                'keywords':  4,
+                'people':    1,
+                'plots':     1,
             }
         )
 
@@ -409,7 +453,7 @@ def main():
         groups = []
         with open("data/movie-links.list") as f:
             group = []
-            regex_begin = re.compile('\((follows |followed by |version of )')
+            regex_begin = re.compile('\((follows |followed by |version of |alternate language version of )')
             regex_end = re.compile(r'\(\d\d\d\d(/([IVXLC]+))?\)|\(\?\?\?\?(/([IVXLC]+))?\)')
             for l in f:
                 if len(l.strip()) == 0:
@@ -418,16 +462,18 @@ def main():
                         group = []
                     continue
 
-                l = l.strip()
 
                 if l.startswith(" "):
                     l = l[regex_begin.search(l).end():]
+
+                l = l.strip()
 
                 movie = l[:regex_end.search(l).end()]
                 if not movie in seen and movie in data:
                     seen.add(movie)
                     group.append(movie)
 
+        groups = filter(lambda g: len(g) > 1, groups)
 
         indices = {}
         for i, name in enumerate(data.keys()):
@@ -436,13 +482,21 @@ def main():
         q_print("Comparing movie links to clusters.")
         count = 0
         for group in groups:
-            first_index = km.labels_[indices[group[0]]]
-            print(len(group))
+            first = km.labels_[indices[group[0]]]
             if all(km.labels_[indices[movie]] == first for movie in group[1:]):
                 count += 1
-        print(sum(len(group) for group in groups) / float(len(groups)))
+
         q_print("{} out of {} movie links are contained by clusters.".format(count, len(groups)))
 
+        # hand picked sets of movies that ought to be clustered together
+        q_print("Comparing pre-picked movies to clusters.")
+        count = 0
+        for group in get_match_sets():
+            first = km.labels_[indices[group[0]]]
+            if all(km.labels_[indices[movie]] == first for movie in group[1:]):
+                count += 1
+
+        q_print("{} out of {} pre-picked groups correspond to clusters.".format(count, len(get_match_sets())))
 
 
 main()
